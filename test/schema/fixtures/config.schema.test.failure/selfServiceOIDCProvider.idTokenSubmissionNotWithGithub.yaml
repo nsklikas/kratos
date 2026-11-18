@@ -1,0 +1,7 @@
+id: foo
+provider: github
+client_id: foo
+client_secret: foo
+issuer_url: https://example.com
+mapper_url: https://example.com
+id_token_submission_enabled: true

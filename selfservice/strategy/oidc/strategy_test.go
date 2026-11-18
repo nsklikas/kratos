@@ -5,6 +5,7 @@ package oidc_test
 
 import (
 	"bytes"
+	"cmp"
 	"context"
 	"encoding/json"
 	"fmt"
@@ -21,6 +22,7 @@ import (
 
 	"github.com/davecgh/go-spew/spew"
 	"github.com/gofrs/uuid"
+	"github.com/golang-jwt/jwt/v4"
 	"github.com/pkg/errors"
 	"github.com/samber/lo"
 	"github.com/stretchr/testify/assert"
@@ -49,6 +51,7 @@ import (
 	"github.com/ory/x/ioutilx"
 	"github.com/ory/x/randx"
 	"github.com/ory/x/snapshotx"
+	"github.com/ory/x/sqlcon"
 	"github.com/ory/x/sqlxx"
 	"github.com/ory/x/urlx"
 	"github.com/ory/x/uuidx"
@@ -2589,4 +2592,162 @@ func findCsrfTokenPath(t *testing.T, body []byte) string {
 	})
 	require.GreaterOrEqual(t, index, 0)
 	return fmt.Sprintf("ui.nodes.%v.attributes.value", index)
+}
+
+func TestGenericProviderIDTokenSubmission(t *testing.T) {
+	t.Parallel()
+
+	issuer := newIDTokenIssuer(t, publicJWKS)
+	conf, reg := pkg.NewFastRegistryWithMocks(t,
+		configx.WithValues(testhelpers.DefaultIdentitySchemaConfig("file://./stub/registration.schema.json")),
+		configx.WithValue(config.HookStrategyKey(config.ViperKeySelfServiceRegistrationAfter, identity.CredentialsTypeOIDC.String()), []config.SelfServiceHook{{Name: "session"}}),
+	)
+	publicTS, _ := testhelpers.NewKratosServerWithCSRF(t, reg)
+
+	provider := func(id string, idTokenSubmissionEnabled bool) oidc.Configuration {
+		return oidc.Configuration{
+			Provider:                 "generic",
+			ID:                       id,
+			ClientID:                 "client",
+			ClientSecret:             "secret",
+			IssuerURL:                issuer.URL,
+			Mapper:                   "file://./stub/oidc.subject-only.jsonnet",
+			IDTokenSubmissionEnabled: idTokenSubmissionEnabled,
+		}
+	}
+	setProviderConfig(t, conf, provider("enabled", true), provider("disabled", false))
+
+	submit := func(t *testing.T, client *http.Client, action string, values url.Values) (*http.Response, []byte) {
+		req, err := http.NewRequestWithContext(t.Context(), http.MethodPost, action, strings.NewReader(values.Encode()))
+		require.NoError(t, err)
+		req.Header.Set("Content-Type", "application/x-www-form-urlencoded")
+		req.Header.Set("Accept", "application/json")
+		res, err := client.Do(req)
+		require.NoError(t, err)
+		defer func() { _ = res.Body.Close() }()
+		return res, ioutilx.MustReadAll(res.Body)
+	}
+
+	hasSessionCookie := func(res *http.Response) bool {
+		return slices.ContainsFunc(res.Cookies(), func(c *http.Cookie) bool { return c.Name == config.DefaultSessionCookieName })
+	}
+
+	// Each flow returns the client that started it, the URL to submit to, and the anti-CSRF token.
+	flows := map[string]func(t *testing.T) (*http.Client, string, string){
+		"api/login": func(t *testing.T) (*http.Client, string, string) {
+			c := testhelpers.NewTestClient(t)
+			return c, testhelpers.InitializeLoginFlowViaAPICtx(t.Context(), t, c, publicTS, false).Ui.Action, ""
+		},
+		"api/registration": func(t *testing.T) (*http.Client, string, string) {
+			c := testhelpers.NewTestClient(t)
+			return c, testhelpers.InitializeRegistrationFlowViaAPICtx(t.Context(), t, c, publicTS).Ui.Action, ""
+		},
+		"browser/login": func(t *testing.T) (*http.Client, string, string) {
+			c := testhelpers.NewClientWithCookies(t)
+			f := testhelpers.InitializeLoginFlowViaBrowserCtx(t.Context(), t, c, publicTS, false, true, false, false)
+			return c, f.Ui.Action, testhelpers.SDKFormFieldsToURLValues(f.Ui.Nodes).Get("csrf_token")
+		},
+		"browser/registration": func(t *testing.T) (*http.Client, string, string) {
+			c := testhelpers.NewClientWithCookies(t)
+			f := testhelpers.InitializeRegistrationFlowViaBrowserCtx(t.Context(), t, c, publicTS, true, false, false)
+			return c, f.Ui.Action, testhelpers.SDKFormFieldsToURLValues(f.Ui.Nodes).Get("csrf_token")
+		},
+	}
+
+	for _, tc := range []struct {
+		name     string
+		provider string
+		// claims changes the claims of an ID token that would be accepted.
+		claims func(jwt.MapClaims)
+		// values changes the values of a submission that would be accepted.
+		values func(url.Values)
+		// reason is the expected error. If empty, the submission is expected to sign in.
+		reason string
+	}{
+		{
+			name: "valid",
+		},
+		{
+			name:     "ID token submission is not enabled",
+			provider: "disabled",
+			reason:   "The provider generic does not support id_token verification",
+		},
+		{
+			name:   "ID token issued to another client",
+			claims: func(c jwt.MapClaims) { c["aud"] = "other-client" },
+			reason: "Could not verify id_token",
+		},
+		{
+			name:   "no nonce in the ID token",
+			claims: func(c jwt.MapClaims) { delete(c, "nonce") },
+			reason: "No nonce was included in the id_token but is required by the provider",
+		},
+		{
+			name:   "no nonce submitted",
+			values: func(v url.Values) { v.Del("id_token_nonce") },
+			reason: "No nonce was provided but is required by the provider",
+		},
+		{
+			name:   "nonce does not match",
+			values: func(v url.Values) { v.Set("id_token_nonce", "another-nonce") },
+			reason: "The supplied nonce does not match the nonce from the id_token",
+		},
+	} {
+		for name, newFlow := range flows {
+			t.Run(fmt.Sprintf("case=%s/flow=%s", tc.name, name), func(t *testing.T) {
+				subject := testhelpers.RandomEmail()
+				// submitTo submits a new ID token for the subject to a new flow.
+				submitTo := func(newFlow func(t *testing.T) (*http.Client, string, string)) (*http.Response, []byte) {
+					client, action, csrfToken := newFlow(t)
+					nonce := randx.MustString(16, randx.Alpha)
+					claims := jwt.MapClaims{
+						"iss":   issuer.URL,
+						"aud":   "client",
+						"sub":   subject,
+						"nonce": nonce,
+						"exp":   time.Now().Add(time.Hour).Unix(),
+					}
+					if tc.claims != nil {
+						tc.claims(claims)
+					}
+					values := url.Values{
+						"csrf_token":     {csrfToken},
+						"method":         {"oidc"},
+						"provider":       {cmp.Or(tc.provider, "enabled")},
+						"id_token":       {signIDToken(t, claims)},
+						"id_token_nonce": {nonce},
+					}
+					if tc.values != nil {
+						tc.values(values)
+					}
+					return submit(t, client, action, values)
+				}
+
+				res, body := submitTo(newFlow)
+				if tc.reason != "" {
+					assert.Equal(t, tc.reason, gjson.GetBytes(body, "error.reason").String(), "%s", body)
+					assert.False(t, hasSessionCookie(res), "%s", body)
+
+					_, _, err := reg.PrivilegedIdentityPool().FindByCredentialsIdentifier(t.Context(), identity.CredentialsTypeOIDC, identity.OIDCUniqueID(cmp.Or(tc.provider, "enabled"), subject))
+					require.ErrorIs(t, err, sqlcon.ErrNoRows())
+					return
+				}
+
+				// The first submission registers the identity, the second signs in to it.
+				require.Equal(t, http.StatusOK, res.StatusCode, "%s", body)
+				registered := gjson.GetBytes(body, "identity.id").String()
+				require.NotEmpty(t, registered, "%s", body)
+
+				flowType, _, _ := strings.Cut(name, "/")
+				res, body = submitTo(flows[flowType+"/login"])
+				require.Equal(t, http.StatusOK, res.StatusCode, "%s", body)
+				assert.Equal(t, registered, gjson.GetBytes(body, "session.identity.id").String(), "%s", body)
+				if flowType == "api" {
+					assert.NotEmpty(t, gjson.GetBytes(body, "session_token").String(), "%s", body)
+				} else {
+					assert.True(t, hasSessionCookie(res), "%s", body)
+				}
+			})
+		}
+	}
 }

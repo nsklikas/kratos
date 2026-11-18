@@ -1,0 +1,9 @@
+id: foo
+provider: generic
+client_id: foo
+client_secret: foo
+issuer_url: https://example.com
+mapper_url: https://example.com
+additional_id_token_audiences:
+  - bar
+id_token_submission_enabled: true

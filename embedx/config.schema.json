@@ -598,6 +598,12 @@
             "examples": ["12345678-1234-1234-1234-123456789012"]
           }
         },
+        "id_token_submission_enabled": {
+          "title": "Enable ID token submission for the generic provider",
+          "description": "If set to true, login and registration flows can be completed by submitting an ID token (`id_token` and `id_token_nonce`) issued by this provider instead of redirecting to the provider. The ID token must be signed using RS256 with a key from the issuer's JSON Web Key Set, be issued to `client_id` or one of `additional_id_token_audiences`, and contain the submitted nonce. This flow is less secure than the redirect-based flow because it skips the authorization code exchange: anyone who obtains an ID token issued to one of these audiences can sign in as its subject until the token expires. Can only be used if `provider` is `generic`, and requires `issuer_url`.",
+          "type": "boolean",
+          "default": false
+        },
         "aal2_acr_values": {
           "title": "Upstream acr values that mark the session as AAL2",
           "description": "List of upstream OIDC `acr` claim values that should elevate the resulting Kratos session to AAL2. If the ID token returned by the upstream provider contains an `acr` claim matching any of these values, the session is marked AAL2. Leave empty to always issue AAL1 sessions for this provider.",
@@ -749,6 +755,24 @@
                 }
               }
             ]
+          }
+        },
+        {
+          "if": {
+            "properties": {
+              "id_token_submission_enabled": {
+                "const": true
+              }
+            },
+            "required": ["id_token_submission_enabled"]
+          },
+          "then": {
+            "properties": {
+              "provider": {
+                "const": "generic"
+              }
+            },
+            "required": ["issuer_url"]
           }
         }
       ]

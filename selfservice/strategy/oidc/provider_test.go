@@ -8,6 +8,7 @@ import (
 	"encoding/json"
 	"fmt"
 	"net/url"
+	"slices"
 	"testing"
 
 	"github.com/stretchr/testify/assert"
@@ -54,6 +55,18 @@ func (t *TestProvider) Verify(_ context.Context, token string) (*Claims, error) 
 		return nil, err
 	}
 	return &c, nil
+}
+
+func TestIDTokenVerifiers(t *testing.T) {
+	// Many providers embed the generic provider. They must not accept
+	// submitted ID tokens through it, whatever their configuration.
+	always := []string{"apple", "google", "netid", "fedcm-test"}
+	for name, newProvider := range supportedProviders {
+		for _, enabled := range []bool{false, true} {
+			_, ok := newProvider(&Configuration{ID: name, Provider: name, IDTokenSubmissionEnabled: enabled}, nil).(IDTokenVerifier)
+			assert.Equal(t, slices.Contains(always, name) || (name == "generic" && enabled), ok, "provider=%s id_token_submission_enabled=%t", name, enabled)
+		}
+	}
 }
 
 // SetUserInfoURL allows overriding the userinfo URL for testing purposes.

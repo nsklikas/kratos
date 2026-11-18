@@ -137,6 +137,13 @@ type Configuration struct {
 	// This is only relevant in OIDC flows that submit an IDToken instead of using the callback from the OIDC provider.
 	AdditionalIDTokenAudiences []string `json:"additional_id_token_audiences"`
 
+	// IDTokenSubmissionEnabled allows completing login and registration flows by submitting an ID Token
+	// (`id_token` and `id_token_nonce`) instead of using the callback from the OIDC provider. The ID Token
+	// must be signed by the issuer, issued to `client_id` or one of `additional_id_token_audiences`, and
+	// contain the submitted nonce.
+	// Can only be used when `provider` is set to `generic`, and requires `issuer_url`. It defaults to `false`.
+	IDTokenSubmissionEnabled bool `json:"id_token_submission_enabled,omitempty"`
+
 	// ClaimsSource is a flag which controls where the claims are taken from when
 	// using the generic provider. Can be either `userinfo` (calls the userinfo
 	// endpoint to get the claims) or `id_token` (takes the claims from the id

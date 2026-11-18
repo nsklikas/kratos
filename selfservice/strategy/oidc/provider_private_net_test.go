@@ -105,4 +105,18 @@ func TestProviderPrivateIP(t *testing.T) {
 			assert.Contains(t, fmt.Sprintf("%+v", err), tc.e)
 		})
 	}
+
+	// A submitted ID token is verified with the issuer's discovery document and its JWKs URL.
+	for k, c := range []*oidc.Configuration{
+		// If the issuer URL is local, we fail
+		{IssuerURL: ts.URL, IDTokenSubmissionEnabled: true},
+		// If the issuer URL has a local JWKs URL, we fail
+		{ClientID: "abcd", IssuerURL: wellknownJWKs, IDTokenSubmissionEnabled: true},
+	} {
+		t.Run(fmt.Sprintf("case=id_token/%d", k), func(t *testing.T) {
+			_, err := generic(c).(oidc.IDTokenVerifier).Verify(t.Context(), fakeJWTJWKS)
+			require.Error(t, err)
+			assert.Contains(t, fmt.Sprintf("%+v", err), "no route to host")
+		})
+	}
 }

@@ -29,10 +29,45 @@ func NewProviderGenericOIDC(
 	config *Configuration,
 	reg Dependencies,
 ) Provider {
-	return &ProviderGenericOIDC{
+	g := &ProviderGenericOIDC{
 		config: config,
 		reg:    reg,
 	}
+	if config.IDTokenSubmissionEnabled {
+		return &providerGenericOIDCIDTokenVerifier{g}
+	}
+	return g
+}
+
+// providerGenericOIDCIDTokenVerifier is the generic provider with ID token
+// submission enabled. It is a type of its own so that neither the generic
+// provider by default, nor the providers embedding it, implement
+// IDTokenVerifier. It does not implement NonceValidationSkipper: the nonce is
+// always required.
+type providerGenericOIDCIDTokenVerifier struct {
+	*ProviderGenericOIDC
+}
+
+var _ IDTokenVerifier = new(providerGenericOIDCIDTokenVerifier)
+
+func (g *providerGenericOIDCIDTokenVerifier) Verify(ctx context.Context, rawIDToken string) (*Claims, error) {
+	p, err := g.provider(ctx)
+	if err != nil {
+		return nil, err
+	}
+
+	var discovery struct {
+		JWKSURL string `json:"jwks_uri"`
+	}
+	if err := p.Claims(&discovery); err != nil {
+		return nil, errors.WithStack(herodot.ErrMisconfiguration().WithReasonf("Unable to read the OpenID Connect Provider's discovery document: %s", err))
+	}
+
+	// The key set fetches the keys with the HTTP client of the context it is created with.
+	ctx = g.withHTTPClientContext(ctx)
+	keySet := gooidc.NewRemoteKeySet(ctx, discovery.JWKSURL)
+
+	return verifyToken(ctx, keySet, g.config, rawIDToken, g.config.IssuerURL)
 }
 
 const (

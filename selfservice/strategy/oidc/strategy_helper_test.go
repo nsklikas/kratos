@@ -372,17 +372,43 @@ var publicJWKS []byte
 var publicJWKS2 []byte
 
 func createIDToken(t *testing.T, cl jwt.RegisteredClaims) string {
-	key := &jwk.KeySpec{}
-	require.NoError(t, json.Unmarshal(rawKey, key))
-	token := jwt.NewWithClaims(jwt.SigningMethodRS256, &struct {
+	return signIDToken(t, &struct {
 		*jwt.RegisteredClaims
 		Email string `json:"email"`
 	}{
 		RegisteredClaims: &cl,
 		Email:            "acme@ory.sh",
 	})
+}
+
+func signIDToken(t *testing.T, claims jwt.Claims) string {
+	key := &jwk.KeySpec{}
+	require.NoError(t, json.Unmarshal(rawKey, key))
+	token := jwt.NewWithClaims(jwt.SigningMethodRS256, claims)
 	token.Header["kid"] = key.KeyID
 	s, err := token.SignedString(key.Key)
 	require.NoError(t, err)
 	return s
+}
+
+// newIDTokenIssuer starts an OpenID Connect issuer that serves a discovery
+// document and the given JSON Web Key Set.
+func newIDTokenIssuer(t *testing.T, jwks []byte) *httptest.Server {
+	router := http.NewServeMux()
+	ts := httptest.NewServer(router)
+	t.Cleanup(ts.Close)
+
+	router.HandleFunc("/.well-known/openid-configuration", func(w http.ResponseWriter, _ *http.Request) {
+		w.Header().Set("Content-Type", "application/json")
+		_ = json.NewEncoder(w).Encode(map[string]string{
+			"issuer":                 ts.URL,
+			"authorization_endpoint": ts.URL + "/auth",
+			"token_endpoint":         ts.URL + "/token",
+			"jwks_uri":               ts.URL + "/jwks",
+		})
+	})
+	router.HandleFunc("/jwks", func(w http.ResponseWriter, _ *http.Request) {
+		_, _ = w.Write(jwks)
+	})
+	return ts
 }
